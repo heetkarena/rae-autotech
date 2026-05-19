@@ -2,17 +2,17 @@ import express from "express"
 import cors from "cors"
 import path from "path"
 import dotenv from "dotenv"
+import { initializeDatabase, sql } from "./database/db-neon.js"
 
 dotenv.config()
 
 const app = express()
 const PORT = process.env.PORT || 5000
-const USE_NEON = process.env.USE_NEON === "true"
 const NODE_ENV = process.env.NODE_ENV || "development"
 const __dirname = "./uploads"
 
 console.log(`Starting server in ${NODE_ENV} mode`)
-console.log(`Database: ${USE_NEON ? "Neon Postgres (Production)" : "SQLite (Development)"}`)
+console.log("Database: Neon Postgres")
 
 // Middleware
 app.use(cors({
@@ -24,26 +24,6 @@ app.use(express.urlencoded({ extended: true }))
 
 // Serve static files (for uploaded images, etc.)
 app.use("/uploads", express.static(path.join(__dirname, "uploads")))
-
-// Import and initialize database based on environment
-let db, initializeDatabase
-
-if (USE_NEON) {
-  console.log("Connecting to Neon Postgres...")
-
-  // DEBUG of DATABASE CONNECTION OF NEON
-
-  // console.log(process.env.DATABASE_URL);
-  // console.log(process.env.USE_NEON);
-
-  const neonModule = await import("./database/db-neon.js")
-  initializeDatabase = neonModule.initializeDatabase
-} else {
-  // console.log("💾 Using SQLite database locally...")
-  // const sqliteModule = await import("./database/init.js")
-  // db = sqliteModule.db
-  // initializeDatabase = sqliteModule.initializeDatabase
-}
 
 // Initialize database
 console.log("Initializing database tables...")
@@ -80,28 +60,23 @@ app.get("/api/health", (req, res) => {
   res.json({
     status: "OK",
     message: "Rameshwar Autotech API is running",
-    database: USE_NEON ? "Neon Postgres" : "SQLite",
+    database: "Neon Postgres",
     environment: NODE_ENV,
     timestamp: new Date().toISOString(),
   })
 })
 
-// Debug route to check database (SQLite only)
-app.get("/api/debug/tables", (req, res) => {
-  if (USE_NEON) {
-    return res.json({ 
-      message: "Debug endpoint not available for Neon. Check Neon dashboard.",
-      database: "Neon Postgres"
-    })
-  }
-
-  db.all("SELECT name FROM sqlite_master WHERE type='table'", [], (err, tables) => {
-    if (err) {
-      return res.status(500).json({ error: err.message })
-    }
-
+// Debug route to check database tables on Neon
+app.get("/api/debug/tables", async (req, res) => {
+  try {
+    const tables = await sql.query(
+      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name"
+    )
     res.json({ tables })
-  })
+  } catch (error) {
+    console.error("Debug database error:", error)
+    res.status(500).json({ error: error.message })
+  }
 })
 
 // Error handling middleware

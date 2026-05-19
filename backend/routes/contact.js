@@ -1,9 +1,5 @@
-// const express = require("express")
-// const { db } = require("../database/init")
-// const { validateContactForm, sendNotificationEmail } = require("../utils/helpers")
-
 import express from "express"
-import { db } from "../database/init.js"
+import { sql } from "../database/db-neon.js"
 import { validateContactForm, sendNotificationEmail } from "../utils/helpers.js"
 
 const router = express.Router()
@@ -13,7 +9,6 @@ router.post("/submit", async (req, res) => {
   try {
     const { name, email, phone, subject, message } = req.body
 
-    // Validate input
     const validation = validateContactForm({ name, email, phone, message })
     if (!validation.isValid) {
       return res.status(400).json({
@@ -22,34 +17,29 @@ router.post("/submit", async (req, res) => {
       })
     }
 
-    // Insert into database
-    db.run(
+    const result = await sql.query(
       `INSERT INTO contact_inquiries (name, email, phone, subject, message)
-       VALUES (?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
       [name, email, phone, subject || "", message],
-      function (err) {
-        if (err) {
-          console.error("Database error:", err)
-          return res.status(500).json({ error: "Failed to save inquiry" })
-        }
-
-        // Send notification email (optional - implement based on needs)
-        sendNotificationEmail({
-          name,
-          email,
-          phone,
-          subject,
-          message,
-          inquiryId: this.lastID,
-        })
-
-        res.status(201).json({
-          success: true,
-          message: "Thank you for your inquiry! We will get back to you soon.",
-          inquiryId: this.lastID,
-        })
-      },
     )
+
+    const inquiryId = result[0]?.id ?? null
+
+    sendNotificationEmail({
+      name,
+      email,
+      phone,
+      subject,
+      message,
+      inquiryId,
+    })
+
+    res.status(201).json({
+      success: true,
+      message: "Thank you for your inquiry! We will get back to you soon.",
+      inquiryId,
+    })
   } catch (error) {
     console.error("Contact form error:", error)
     res.status(500).json({ error: "Internal server error" })
@@ -57,85 +47,79 @@ router.post("/submit", async (req, res) => {
 })
 
 // Get all contact inquiries (admin only)
-router.get("/inquiries", (req, res) => {
-  const page = Number.parseInt(req.query.page) || 1
-  const limit = Number.parseInt(req.query.limit) || 10
-  const offset = (page - 1) * limit
-  const status = req.query.status || "all"
+router.get("/inquiries", async (req, res) => {
+  try {
+    const page = Number.parseInt(req.query.page, 10) || 1
+    const limit = Number.parseInt(req.query.limit, 10) || 10
+    const offset = (page - 1) * limit
+    const status = req.query.status || "all"
 
-  let query = "SELECT * FROM contact_inquiries"
-  const params = []
-
-  if (status !== "all") {
-    query += " WHERE status = ?"
-    params.push(status)
-  }
-
-  query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-  params.push(limit, offset)
-
-  db.all(query, params, (err, rows) => {
-    if (err) {
-      console.error("Database error:", err)
-      return res.status(500).json({ error: "Failed to fetch inquiries" })
-    }
-
-    // Get total count
-    let countQuery = "SELECT COUNT(*) as total FROM contact_inquiries"
-    const countParams = []
+    let query = "SELECT * FROM contact_inquiries"
+    const params = []
 
     if (status !== "all") {
-      countQuery += " WHERE status = ?"
+      query += ` WHERE status = $${params.length + 1}`
+      params.push(status)
+    }
+
+    query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`
+    params.push(limit, offset)
+
+    const inquiries = await sql.query(query, params)
+
+    let countQuery = "SELECT COUNT(*) as total FROM contact_inquiries"
+    const countParams = []
+    if (status !== "all") {
+      countQuery += ` WHERE status = $${countParams.length + 1}`
       countParams.push(status)
     }
 
-    db.get(countQuery, countParams, (err, countResult) => {
-      if (err) {
-        console.error("Count query error:", err)
-        return res.status(500).json({ error: "Failed to get total count" })
-      }
+    const countRows = await sql.query(countQuery, countParams)
+    const total = countRows[0]?.total ?? 0
 
-      res.json({
-        inquiries: rows,
-        pagination: {
-          page,
-          limit,
-          total: countResult.total,
-          totalPages: Math.ceil(countResult.total / limit),
-        },
-      })
+    res.json({
+      inquiries,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
     })
-  })
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to fetch inquiries" })
+  }
 })
 
 // Update inquiry status
-router.patch("/inquiries/:id/status", (req, res) => {
-  const { id } = req.params
-  const { status } = req.body
+router.patch("/inquiries/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params
+    const { status } = req.body
 
-  const validStatuses = ["new", "in_progress", "resolved", "closed"]
-  if (!validStatuses.includes(status)) {
-    return res.status(400).json({ error: "Invalid status" })
+    const validStatuses = ["new", "in_progress", "resolved", "closed"]
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: "Invalid status" })
+    }
+
+    const result = await sql.query(
+      `UPDATE contact_inquiries
+       SET status = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [status, id],
+      { fullResults: true },
+    )
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Inquiry not found" })
+    }
+
+    res.json({ success: true, message: "Status updated successfully" })
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to update status" })
   }
-
-  db.run(
-    `UPDATE contact_inquiries 
-     SET status = ?, updated_at = CURRENT_TIMESTAMP 
-     WHERE id = ?`,
-    [status, id],
-    function (err) {
-      if (err) {
-        console.error("Database error:", err)
-        return res.status(500).json({ error: "Failed to update status" })
-      }
-
-      if (this.changes === 0) {
-        return res.status(404).json({ error: "Inquiry not found" })
-      }
-
-      res.json({ success: true, message: "Status updated successfully" })
-    },
-  )
 })
 
-export default router;
+export default router

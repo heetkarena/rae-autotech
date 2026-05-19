@@ -1,198 +1,196 @@
-// const express = require("express")
-// const { db } = require("../database/init")
-// const { validateProduct } = require("../utils/helpers")
-
 import express from "express"
-import { db } from "../database/init.js"
+import { sql } from "../database/db-neon.js"
 import { validateProduct } from "../utils/helpers.js"
 
 const router = express.Router()
 
 // Get all products
-router.get("/", (req, res) => {
-  const type = req.query.type // 'battery' or 'inverter'
-  const category = req.query.category
-  const featured = req.query.featured
-  const page = Number.parseInt(req.query.page) || 1
-  const limit = Number.parseInt(req.query.limit) || 20
-  const offset = (page - 1) * limit
+router.get("/", async (req, res) => {
+  try {
+    const type = req.query.type
+    const category = req.query.category
+    const featured = req.query.featured
+    const page = Number.parseInt(req.query.page, 10) || 1
+    const limit = Number.parseInt(req.query.limit, 10) || 20
+    const offset = (page - 1) * limit
 
-  let query = "SELECT * FROM products WHERE is_active = 1"
-  const params = []
+    let query = "SELECT * FROM products WHERE is_active = TRUE"
+    const params = []
 
-  if (type) {
-    query += " AND type = ?"
-    params.push(type)
-  }
-
-  if (category) {
-    query += " AND category = ?"
-    params.push(category)
-  }
-
-  if (featured === "true") {
-    query += " AND is_featured = 1"
-  }
-
-  query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-  params.push(limit, offset)
-
-  db.all(query, params, (err, rows) => {
-    if (err) {
-      console.error("Database error:", err)
-      return res.status(500).json({ error: "Failed to fetch products" })
+    if (type) {
+      query += ` AND type = $${params.length + 1}`
+      params.push(type)
     }
 
+    if (category) {
+      query += ` AND category = $${params.length + 1}`
+      params.push(category)
+    }
+
+    if (featured === "true") {
+      query += " AND is_featured = TRUE"
+    }
+
+    query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`
+    params.push(limit, offset)
+
+    const products = await sql.query(query, params)
+
     res.json({
-      products: rows,
+      products,
       pagination: {
         page,
         limit,
-        hasMore: rows.length === limit,
+        hasMore: products.length === limit,
       },
     })
-  })
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to fetch products" })
+  }
 })
 
 // Get single product
-router.get("/:id", (req, res) => {
-  const { id } = req.params
+router.get("/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+    const products = await sql.query(
+      "SELECT * FROM products WHERE id = $1 AND is_active = TRUE",
+      [id],
+    )
 
-  db.get("SELECT * FROM products WHERE id = ? AND is_active = 1", [id], (err, row) => {
-    if (err) {
-      console.error("Database error:", err)
-      return res.status(500).json({ error: "Failed to fetch product" })
-    }
-
-    if (!row) {
+    const product = products[0]
+    if (!product) {
       return res.status(404).json({ error: "Product not found" })
     }
 
-    res.json(row)
-  })
+    res.json(product)
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to fetch product" })
+  }
 })
 
 // Create new product (admin only)
-router.post("/", (req, res) => {
-  const { name, description, category, type, brand, price, image_url, is_featured } = req.body
+router.post("/", async (req, res) => {
+  try {
+    const { name, description, category, type, brand, price, image_url, is_featured } = req.body
 
-  // Validate input
-  const validation = validateProduct(req.body)
-  if (!validation.isValid) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: validation.errors,
-    })
-  }
-
-  db.run(
-    `
-    INSERT INTO products (name, description, category, type, brand, price, image_url, is_featured)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `,
-    [name, description, category, type, brand, price || null, image_url || null, is_featured || 0],
-    function (err) {
-      if (err) {
-        console.error("Database error:", err)
-        return res.status(500).json({ error: "Failed to create product" })
-      }
-
-      res.status(201).json({
-        success: true,
-        message: "Product created successfully",
-        productId: this.lastID,
+    const validation = validateProduct(req.body)
+    if (!validation.isValid) {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: validation.errors,
       })
-    },
-  )
+    }
+
+    const newPrice = price != null ? price : null
+    const newImageUrl = image_url || null
+    const featuredValue = is_featured === true || is_featured === "true"
+
+    const result = await sql.query(
+      `INSERT INTO products (name, description, category, type, brand, price, image_url, is_featured)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [name, description, category, type, brand, newPrice, newImageUrl, featuredValue],
+    )
+
+    res.status(201).json({
+      success: true,
+      message: "Product created successfully",
+      productId: result[0]?.id,
+    })
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to create product" })
+  }
 })
 
 // Update product (admin only)
-router.put("/:id", (req, res) => {
-  const { id } = req.params
-  const { name, description, category, type, brand, price, image_url, is_featured } = req.body
+router.put("/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+    const { name, description, category, type, brand, price, image_url, is_featured } = req.body
 
-  // Validate input
-  const validation = validateProduct(req.body)
-  if (!validation.isValid) {
-    return res.status(400).json({
-      error: "Validation failed",
-      details: validation.errors,
-    })
+    const validation = validateProduct(req.body)
+    if (!validation.isValid) {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: validation.errors,
+      })
+    }
+
+    const newPrice = price != null ? price : null
+    const newImageUrl = image_url || null
+    const featuredValue = is_featured === true || is_featured === "true"
+
+    const result = await sql.query(
+      `UPDATE products
+       SET name = $1, description = $2, category = $3, type = $4, brand = $5,
+           price = $6, image_url = $7, is_featured = $8, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $9`,
+      [name, description, category, type, brand, newPrice, newImageUrl, featuredValue, id],
+      { fullResults: true },
+    )
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Product not found" })
+    }
+
+    res.json({ success: true, message: "Product updated successfully" })
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to update product" })
   }
-
-  db.run(
-    `
-    UPDATE products 
-    SET name = ?, description = ?, category = ?, type = ?, brand = ?, 
-        price = ?, image_url = ?, is_featured = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `,
-    [name, description, category, type, brand, price || null, image_url || null, is_featured || 0, id],
-    function (err) {
-      if (err) {
-        console.error("Database error:", err)
-        return res.status(500).json({ error: "Failed to update product" })
-      }
-
-      if (this.changes === 0) {
-        return res.status(404).json({ error: "Product not found" })
-      }
-
-      res.json({ success: true, message: "Product updated successfully" })
-    },
-  )
 })
 
 // Delete product (admin only)
-router.delete("/:id", (req, res) => {
-  const { id } = req.params
+router.delete("/:id", async (req, res) => {
+  try {
+    const { id } = req.params
 
-  // Soft delete - just mark as inactive
-  db.run(
-    `
-    UPDATE products 
-    SET is_active = 0, updated_at = CURRENT_TIMESTAMP 
-    WHERE id = ?
-  `,
-    [id],
-    function (err) {
-      if (err) {
-        console.error("Database error:", err)
-        return res.status(500).json({ error: "Failed to delete product" })
-      }
+    const result = await sql.query(
+      `UPDATE products
+       SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [id],
+      { fullResults: true },
+    )
 
-      if (this.changes === 0) {
-        return res.status(404).json({ error: "Product not found" })
-      }
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Product not found" })
+    }
 
-      res.json({ success: true, message: "Product deleted successfully" })
-    },
-  )
+    res.json({ success: true, message: "Product deleted successfully" })
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to delete product" })
+  }
 })
 
 // Get product categories
-router.get("/meta/categories", (req, res) => {
-  const type = req.query.type
+router.get("/meta/categories", async (req, res) => {
+  try {
+    const type = req.query.type
 
-  let query = "SELECT DISTINCT category FROM products WHERE is_active = 1"
-  const params = []
+    let query = "SELECT DISTINCT category FROM products WHERE is_active = TRUE"
+    const params = []
 
-  if (type) {
-    query += " AND type = ?"
-    params.push(type)
-  }
-
-  query += " ORDER BY category"
-
-  db.all(query, params, (err, rows) => {
-    if (err) {
-      console.error("Database error:", err)
-      return res.status(500).json({ error: "Failed to fetch categories" })
+    if (type) {
+      query += ` AND type = $${params.length + 1}`
+      params.push(type)
     }
 
+    query += " ORDER BY category"
+
+    const rows = await sql.query(query, params)
     const categories = rows.map((row) => row.category)
+
     res.json({ categories })
-  })
+  } catch (error) {
+    console.error("Database error:", error)
+    res.status(500).json({ error: "Failed to fetch categories" })
+  }
 })
 
 export default router

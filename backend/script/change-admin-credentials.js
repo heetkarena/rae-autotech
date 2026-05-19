@@ -1,10 +1,5 @@
-// Script to change admin credentials
-// const bcrypt = require("bcrypt")
-// const { db } = require("../database/init")
-// const readline = require("readline")
-
-import bcrypt from "bcrypt" 
-import { db } from "../database/init.js"
+import bcrypt from "bcrypt"
+import { sql } from "../database/db-neon.js"
 import readline from "readline"
 
 const rl = readline.createInterface({
@@ -12,16 +7,15 @@ const rl = readline.createInterface({
   output: process.stdout,
 })
 
-async function changeAdminCredentials() {
-  console.log("🔐 Change Admin Credentials")
-  console.log("==========================")
+const question = (query) => new Promise((resolve) => rl.question(query, resolve))
 
-  // Get current admin
-  db.get("SELECT * FROM admin_users WHERE is_active = 1", [], async (err, admin) => {
-    if (err) {
-      console.error("❌ Database error:", err)
-      process.exit(1)
-    }
+async function changeAdminCredentials() {
+  try {
+    console.log("🔐 Change Admin Credentials")
+    console.log("==========================")
+
+    const admins = await sql.query("SELECT * FROM admin_users WHERE is_active = TRUE")
+    const admin = admins[0]
 
     if (!admin) {
       console.log("❌ No admin user found. Please create an admin first.")
@@ -31,52 +25,47 @@ async function changeAdminCredentials() {
     console.log(`Current admin: ${admin.username} (${admin.email})`)
     console.log("")
 
-    rl.question("Enter new username: ", (newUsername) => {
-      rl.question("Enter new email: ", (newEmail) => {
-        rl.question("Enter new password: ", async (newPassword) => {
-          rl.question("Confirm new password: ", async (confirmPassword) => {
-            if (newPassword !== confirmPassword) {
-              console.log("❌ Passwords don't match!")
-              rl.close()
-              return
-            }
+    const newUsername = await question("Enter new username: ")
+    const newEmail = await question("Enter new email: ")
+    const newPassword = await question("Enter new password: ")
+    const confirmPassword = await question("Confirm new password: ")
 
-            if (newPassword.length < 8) {
-              console.log("❌ Password must be at least 8 characters long!")
-              rl.close()
-              return
-            }
+    if (newPassword !== confirmPassword) {
+      console.log("❌ Passwords don't match!")
+      rl.close()
+      return
+    }
 
-            try {
-              const saltRounds = 10
-              const passwordHash = await bcrypt.hash(newPassword, saltRounds)
+    if (newPassword.length < 8) {
+      console.log("❌ Password must be at least 8 characters long!")
+      rl.close()
+      return
+    }
 
-              db.run(
-                `UPDATE admin_users 
-                 SET username = ?, email = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP 
-                 WHERE id = ?`,
-                [newUsername, newEmail, passwordHash, admin.id],
-                (err) => {
-                  if (err) {
-                    console.error("❌ Error updating credentials:", err)
-                  } else {
-                    console.log("✅ Admin credentials updated successfully!")
-                    console.log(`New Username: ${newUsername}`)
-                    console.log(`New Email: ${newEmail}`)
-                    console.log("🔒 Password updated securely")
-                  }
-                  rl.close()
-                },
-              )
-            } catch (error) {
-              console.error("❌ Error hashing password:", error)
-              rl.close()
-            }
-          })
-        })
-      })
-    })
-  })
+    const saltRounds = 10
+    const passwordHash = await bcrypt.hash(newPassword, saltRounds)
+
+    const result = await sql.query(
+      `UPDATE admin_users
+       SET username = $1, email = $2, password_hash = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4`,
+      [newUsername, newEmail, passwordHash, admin.id],
+      { fullResults: true },
+    )
+
+    if (result.rowCount === 0) {
+      console.log("❌ Failed to update admin credentials.")
+    } else {
+      console.log("✅ Admin credentials updated successfully!")
+      console.log(`New Username: ${newUsername}`)
+      console.log(`New Email: ${newEmail}`)
+      console.log("🔒 Password updated securely")
+    }
+  } catch (error) {
+    console.error("❌ Error updating credentials:", error)
+  } finally {
+    rl.close()
+  }
 }
 
 changeAdminCredentials()

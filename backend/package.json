@@ -16,7 +16,8 @@
     "autotech",
     "api",
     "express",
-    "sqlite"
+    "postgres",
+    "neon"
   ],
   "author": "Rameshwar Autotech",
   "license": "MIT",
